@@ -1,17 +1,28 @@
 """
-CondSeg Iris Estimator (Regression Head)
-=========================================
-Takes the deepest encoder feature map, applies Global Average Pooling
-and an MLP to regress 5D elliptical parameters for the full iris.
+CondSeg Iris Estimator (Spatial Regression Head)
+=================================================
+Takes the deepest encoder feature map and regresses 5D elliptical
+parameters using spatial-aware strided convolutions instead of GAP.
+
+WHY NOT GAP?
+    GAP collapses the entire 32×32 feature map into a single 1×1 pixel,
+    destroying all spatial (X, Y) coordinate information. The model knows
+    "there is an iris" but cannot tell WHERE it is — leading to random
+    center predictions and degenerate elongated ellipses.
+
+SOLUTION: Spatial Compression
+    Use strided Conv2d layers to gradually reduce the feature map while
+    PRESERVING spatial structure, then pool to a 4×4 grid (16 spatial
+    bins). The MLP can then learn position-dependent mappings.
 
 Output: normalized parameters in (0, 1) via Sigmoid, then converted
 to absolute pixel coordinates.
 
-Conversion (per paper Eq. 2):
+Conversion:
     x0 = x̂0 × W
     y0 = ŷ0 × H
-    a  = (â + ε) × min(W, H) / 2
-    b  = (b̂ + ε) × min(W, H) / 2
+    a  = (â + ε) × min(W, H) / 4
+    b  = (b̂ + ε) × min(W, H) / 4
     θ  = θ̂                   (raw sigmoid output, range [0, 1])
 
     ε = 0.01 for iris (prevents degenerate zero-length axes)
@@ -24,7 +35,12 @@ import torch.nn as nn
 
 class IrisEstimator(nn.Module):
     """
-    Regression head: encoder features → 5D ellipse parameters.
+    Spatial regression head: encoder features → 5D ellipse parameters.
+
+    Instead of Global Average Pooling (which destroys spatial info),
+    uses strided convolutions to compress features while retaining
+    a 4×4 spatial grid — giving the model 16 spatial bins to
+    localize the iris center.
 
     Args:
         in_channels: Number of channels in the deepest encoder feature map (1536 for EfficientNet-B3).
@@ -43,12 +59,22 @@ class IrisEstimator(nn.Module):
         super().__init__()
         self.epsilon = epsilon
 
-        # Global Average Pooling collapses spatial dims → (B, C, 1, 1)
-        self.gap = nn.AdaptiveAvgPool2d(1)
+        # ---- Spatial Compression (replaces GAP) ----
+        # Gradually reduce channels while preserving spatial structure.
+        # Input: (B, 1536, 32, 32) → Output: (B, 128, 4, 4)
+        self.spatial_compress = nn.Sequential(
+            nn.Conv2d(in_channels, 256, kernel_size=3, padding=1, stride=2),  # → (B, 256, 16, 16)
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 128, kernel_size=3, padding=1, stride=2),          # → (B, 128, 8, 8)
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((4, 4)),                                      # → (B, 128, 4, 4)
+        )
 
-        # MLP: C → hidden → hidden → 5
+        # 4×4 grid × 128 channels = 2048-dim flattened vector
         self.mlp = nn.Sequential(
-            nn.Linear(in_channels, hidden_dim),
+            nn.Linear(128 * 4 * 4, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),
@@ -73,9 +99,9 @@ class IrisEstimator(nn.Module):
         """
         B = features.shape[0]
 
-        # ---- Global Average Pooling ----
-        x = self.gap(features)        # (B, C, 1, 1)
-        x = x.view(B, -1)            # (B, C)
+        # ---- Spatial Compression (preserves 4×4 spatial grid) ----
+        x = self.spatial_compress(features)   # (B, 128, 4, 4)
+        x = x.view(B, -1)                    # (B, 2048) — spatial info preserved!
 
         # ---- MLP + Sigmoid → normalized params in (0, 1) ----
         params_norm = self.sigmoid(self.mlp(x))  # (B, 5)
@@ -92,9 +118,9 @@ class IrisEstimator(nn.Module):
 
         x0 = x_hat * W                                 # pixel x-center
         y0 = y_hat * H                                 # pixel y-center
-        a  = (a_hat + self.epsilon) * min_dim / 2.0     # semi-major axis (pixels)
-        b  = (b_hat + self.epsilon) * min_dim / 2.0     # semi-minor axis (pixels)
-        theta = t_hat                                   # angle (raw sigmoid, [0, 1]) per paper Eq. 2
+        a  = (a_hat + self.epsilon) * min_dim / 4.0     # semi-axis (pixels), /4 caps max radius
+        b  = (b_hat + self.epsilon) * min_dim / 4.0     # semi-axis (pixels), /4 caps max radius
+        theta = t_hat                                   # angle (raw sigmoid, [0, 1])
 
         # Stack back to (B, 5)
         params_abs = torch.stack([x0, y0, a, b, theta], dim=1)  # (B, 5)

@@ -14,7 +14,7 @@ Mathematical Pipeline:
     4. Convert to soft mask S = Sigmoid( -D × effective_scale )
 
 FIX: max(D) normalization removed — caused reward hacking at high res.
-NOTE: effective_scale=10.0 provides resolution-independent gradients.
+NOTE: effective_scale=50.0 sharpens edges — forces precise ellipse placement.
 CRITICAL: M off-diagonal elements are B/2, D/2, E/2 (factor of 2).
 """
 
@@ -143,7 +143,7 @@ class Ellp2Mask(nn.Module):
         # üretmeyi öğreniyordu. Bunun yerine sabit bir ölçek katsayısı kullanıyoruz.
         # Quadratic form D zaten eksen uzunluklarına (a, b) göre normalize olduğu
         # için sabit scale, gradyanların doğrudan elips sınırlarına akmasını sağlar.
-        effective_scale = 10.0
+        effective_scale = 50.0
         logits = -dist_map * effective_scale  # (B, H, W)
 
         soft_mask = torch.sigmoid(logits)  # (B, H, W)

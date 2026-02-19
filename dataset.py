@@ -313,32 +313,32 @@ class EyeSegmentationDataset(Dataset):
                     scale_limit=0.15,
                     rotate_limit=15,
                     interpolation=cv2.INTER_LINEAR,
-                    p=0.5,
+                    p=0.7,
                 ),
                 A.RandomResizedCrop(
                     size=(img_size, img_size),
                     scale=(0.8, 1.0),
                     ratio=(0.9, 1.1),
                     interpolation=cv2.INTER_LINEAR,
-                    p=0.3,
+                    p=0.5,
                 ),
                 # ↓ Siyah dolgu YOK — gradient fill kullanır
                 SmartFillElasticTransform(
                     alpha=30,
                     sigma=5,
-                    p=0.15,
+                    p=0.3,
                 ),
 
                 # === Photometric (image only) ===
                 A.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.05, p=0.8),
-                A.RandomGamma(gamma_limit=(70, 150), p=0.2),
+                A.RandomGamma(gamma_limit=(70, 150), p=0.4),
                 A.OneOf([
                     A.GaussianBlur(blur_limit=(3, 7), p=1.0),
                     A.MotionBlur(blur_limit=(3, 15), p=1.0),
                     A.MedianBlur(blur_limit=5, p=1.0),
-                ], p=0.3),
-                A.GaussNoise(std_range=(0.01, 0.04), p=0.2),
-                A.ToGray(p=0.05),
+                ], p=0.5),
+                A.GaussNoise(std_range=(0.01, 0.04), p=0.4),
+                A.ToGray(p=0.1),
 
                 # === Normalize + tensor ===
                 A.Normalize(mean=self.IMAGENET_MEAN, std=self.IMAGENET_STD),

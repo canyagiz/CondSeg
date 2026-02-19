@@ -484,7 +484,7 @@ def main():
         print(f"  LR           : {args.lr}")
         print(f"  AMP          : {args.amp}")
         print(f"  Logger       : {args.logger}")
-        print(f"  scale        : 10.0 (fixed effective_scale)")
+        print(f"  scale        : 50.0 (fixed effective_scale)")
         print(f"  ε            : {args.epsilon}")
         print()
 

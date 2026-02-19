@@ -9,10 +9,11 @@ Training forward pass:
     2. Estimate iris ellipse params from deepest features
     3. Ellp2Mask → soft iris mask + logits
     4. Conditioned Assemble: predicted_visible_iris = soft_iris_mask × eye_region_mask
-    5. Loss = BCEWithLogits(eye_logits, GT) + masked BCEWithLogits(iris_logits, GT)
+    5. Loss = BCE+Dice(eye_logits, GT) + masked BCE+Dice(iris_logits, GT)
 
 CRITICAL: Uses F.binary_cross_entropy_with_logits on raw logits (not
-sigmoid outputs) to prevent vanishing gradients from sigmoid saturation.
+sigmoid outputs) for BCE term. Dice Loss uses sigmoid probabilities for
+boundary-focused overlap optimization.
 """
 
 import torch
@@ -114,6 +115,30 @@ class CondSeg(nn.Module):
             "iris_params": iris_params,
         }
 
+    @staticmethod
+    def _dice_loss(pred_probs: torch.Tensor, target: torch.Tensor,
+                   mask: torch.Tensor = None, smooth: float = 1.0) -> torch.Tensor:
+        """
+        Dice Loss — sınır örtüşmesine odaklanır.
+
+        Args:
+            pred_probs: Sigmoid-activated predictions (B, 1, H, W)
+            target:     Binary ground truth (B, 1, H, W)
+            mask:       Optional spatial mask (B, 1, H, W) — only compute
+                        Dice inside this region (e.g. eye-region for iris)
+            smooth:     Laplace smoothing to avoid 0/0
+        """
+        if mask is not None:
+            pred_probs = pred_probs * mask
+            target = target * mask
+
+        pred_flat = pred_probs.reshape(-1)
+        target_flat = target.reshape(-1)
+        intersection = (pred_flat * target_flat).sum()
+        return 1.0 - (2.0 * intersection + smooth) / (
+            pred_flat.sum() + target_flat.sum() + smooth
+        )
+
     def compute_loss(
         self,
         outputs: dict,
@@ -121,10 +146,10 @@ class CondSeg(nn.Module):
         gt_visible_iris: torch.Tensor,
     ) -> dict:
         """
-        Compute the CondSeg training loss using BCEWithLogitsLoss.
+        Compute the CondSeg training loss: BCE + Dice.
 
-        Using logits (before sigmoid) prevents vanishing gradients when
-        sigmoid saturates at 0.0 or 1.0 (gradient becomes exactly zero).
+        BCE  → pixel-level accuracy (logits)
+        Dice → region overlap / boundary precision (probabilities)
 
         Args:
             outputs:         dict from forward() with predicted masks and logits
@@ -133,8 +158,8 @@ class CondSeg(nn.Module):
 
         Returns:
             dict with keys:
-                'loss_eye':   scalar — BCE loss for eye-region segmentation
-                'loss_iris':  scalar — masked BCE loss for iris estimation
+                'loss_eye':   scalar — BCE + Dice for eye-region segmentation
+                'loss_iris':  scalar — masked BCE + Dice for iris estimation
                 'total_loss': scalar — sum of both losses
         """
         # ---- Get logits (NOT sigmoid outputs) for stable gradient flow ----
@@ -143,18 +168,27 @@ class CondSeg(nn.Module):
         gt_eye_f    = gt_eye_region.float()
         gt_iris_f   = gt_visible_iris.float()
 
-        # ---- Loss_Eye = BCEWithLogits(eye_logits, GT_Eye_Region) ----
-        loss_eye = F.binary_cross_entropy_with_logits(eye_logits, gt_eye_f)
+        # ---- Loss_Eye ----
+        # BCE on logits
+        bce_eye = F.binary_cross_entropy_with_logits(eye_logits, gt_eye_f)
+        # Dice on probabilities
+        eye_probs = torch.sigmoid(eye_logits)
+        dice_eye = self._dice_loss(eye_probs, gt_eye_f)
+        loss_eye = bce_eye + dice_eye
 
-        # ---- Loss_Iris = masked BCEWithLogits (only inside GT eye-region) ----
+        # ---- Loss_Iris = masked (BCE + Dice) inside GT eye-region ----
         # Paper Sec. 3.1: "eye-region mask is used as an ignorance mask"
-        # weight= parameter zeroes out loss for pixels outside eye-region.
         eye_mask = gt_eye_f  # (B, 1, H, W) — binary condition mask
         num_eye_pixels = eye_mask.sum().clamp(min=1.0)
 
-        loss_iris = F.binary_cross_entropy_with_logits(
+        # Masked BCE (logits)
+        bce_iris = F.binary_cross_entropy_with_logits(
             iris_logits, gt_iris_f, weight=eye_mask, reduction='sum'
         ) / num_eye_pixels
+        # Masked Dice (probabilities)
+        iris_probs = torch.sigmoid(iris_logits)
+        dice_iris = self._dice_loss(iris_probs, gt_iris_f, mask=eye_mask)
+        loss_iris = bce_iris + dice_iris
 
         # ---- Total Loss ----
         total_loss = loss_eye + loss_iris
@@ -164,3 +198,4 @@ class CondSeg(nn.Module):
             "loss_iris": loss_iris,
             "total_loss": total_loss,
         }
+

@@ -190,12 +190,22 @@ class CondSeg(nn.Module):
         dice_iris = self._dice_loss(iris_probs, gt_iris_f, mask=eye_mask)
         loss_iris = bce_iris + dice_iris
 
+        # ---- Anatomik Dairesellik Cezası (Circularity Loss) ----
+        # İris 3D'de bir çemberdir; ekrana yansıdığında a ≈ b olmalı.
+        # Model ignorance mask'ı exploit edip devasa uzun elipsler (a≠b)
+        # üretmesin diye L1 cezası ekliyoruz.
+        a_params = outputs["iris_params"][:, 2]  # yarı-eksen a
+        b_params = outputs["iris_params"][:, 3]  # yarı-eksen b
+        loss_shape = F.l1_loss(a_params, b_params)
+        shape_weight = 0.1
+
         # ---- Total Loss ----
-        total_loss = loss_eye + loss_iris
+        total_loss = loss_eye + loss_iris + (loss_shape * shape_weight)
 
         return {
             "loss_eye": loss_eye,
             "loss_iris": loss_iris,
+            "loss_shape": loss_shape,
             "total_loss": total_loss,
         }
 

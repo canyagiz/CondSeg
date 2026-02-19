@@ -358,6 +358,7 @@ def train_one_epoch(
     total_loss_sum = 0.0
     eye_loss_sum = 0.0
     iris_loss_sum = 0.0
+    shape_loss_sum = 0.0
     num_batches = 0
 
     optimizer.zero_grad()
@@ -398,6 +399,7 @@ def train_one_epoch(
         total_loss_sum += losses["total_loss"].item()
         eye_loss_sum   += losses["loss_eye"].item()
         iris_loss_sum  += losses["loss_iris"].item()
+        shape_loss_sum += losses["loss_shape"].item()
         num_batches += 1
         global_step += 1
 
@@ -407,6 +409,7 @@ def train_one_epoch(
                 "step/loss_total": losses["total_loss"].item(),
                 "step/loss_eye": losses["loss_eye"].item(),
                 "step/loss_iris": losses["loss_iris"].item(),
+                "step/loss_shape": losses["loss_shape"].item(),
             }, step=global_step)
 
         # Print progress
@@ -416,14 +419,16 @@ def train_one_epoch(
                   f"loss={losses['total_loss'].item():.4f}  "
                   f"eye={losses['loss_eye'].item():.4f}  "
                   f"iris={losses['loss_iris'].item():.4f}  "
+                  f"shape={losses['loss_shape'].item():.4f}  "
                   f"ellipse=[{iris_params[0]:.0f},{iris_params[1]:.0f},"
                   f"a={iris_params[2]:.0f},b={iris_params[3]:.0f},θ={iris_params[4]:.2f}]")
 
     avg_total = total_loss_sum / max(num_batches, 1)
     avg_eye   = eye_loss_sum / max(num_batches, 1)
     avg_iris  = iris_loss_sum / max(num_batches, 1)
+    avg_shape = shape_loss_sum / max(num_batches, 1)
 
-    return avg_total, avg_eye, avg_iris, global_step
+    return avg_total, avg_eye, avg_iris, avg_shape, global_step
 
 
 @torch.no_grad()
@@ -433,6 +438,7 @@ def validate(model, dataloader, device, use_amp):
     total_loss_sum = 0.0
     eye_loss_sum = 0.0
     iris_loss_sum = 0.0
+    shape_loss_sum = 0.0
     num_batches = 0
 
     for images, gt_eye, gt_iris in dataloader:
@@ -450,13 +456,15 @@ def validate(model, dataloader, device, use_amp):
         total_loss_sum += losses["total_loss"].item()
         eye_loss_sum   += losses["loss_eye"].item()
         iris_loss_sum  += losses["loss_iris"].item()
+        shape_loss_sum += losses["loss_shape"].item()
         num_batches += 1
 
     avg_total = total_loss_sum / max(num_batches, 1)
     avg_eye   = eye_loss_sum / max(num_batches, 1)
     avg_iris  = iris_loss_sum / max(num_batches, 1)
+    avg_shape = shape_loss_sum / max(num_batches, 1)
 
-    return avg_total, avg_eye, avg_iris
+    return avg_total, avg_eye, avg_iris, avg_shape
 
 
 # ============================================================================
@@ -613,13 +621,13 @@ def main():
             train_sampler.set_epoch(epoch)
 
         # Train
-        train_loss, train_eye, train_iris, global_step = train_one_epoch(
+        train_loss, train_eye, train_iris, train_shape, global_step = train_one_epoch(
             model, train_loader, optimizer, scaler, device, epoch,
             args.amp, args.grad_accum, logger, global_step, rank,
         )
 
         # Validate
-        val_loss, val_eye, val_iris = validate(model, val_loader, device, args.amp)
+        val_loss, val_eye, val_iris, val_shape = validate(model, val_loader, device, args.amp)
 
         # Step scheduler
         scheduler.step()
@@ -631,14 +639,14 @@ def main():
         if is_main_process(rank):
             print(f"\n  Epoch {epoch}/{args.epochs-1}  ({epoch_time:.1f}s)  "
                   f"lr={current_lr:.6f}")
-            print(f"    Train — total={train_loss:.4f} eye={train_eye:.4f} iris={train_iris:.4f}")
-            print(f"    Valid — total={val_loss:.4f} eye={val_eye:.4f} iris={val_iris:.4f}")
+            print(f"    Train — total={train_loss:.4f} eye={train_eye:.4f} iris={train_iris:.4f} shape={train_shape:.4f}")
+            print(f"    Valid — total={val_loss:.4f} eye={val_eye:.4f} iris={val_iris:.4f} shape={val_shape:.4f}")
 
             # Log epoch metrics
             logger.log_epoch(
                 epoch=epoch,
-                train_metrics={"loss": train_loss, "loss_eye": train_eye, "loss_iris": train_iris},
-                val_metrics={"loss": val_loss, "loss_eye": val_eye, "loss_iris": val_iris},
+                train_metrics={"loss": train_loss, "loss_eye": train_eye, "loss_iris": train_iris, "loss_shape": train_shape},
+                val_metrics={"loss": val_loss, "loss_eye": val_eye, "loss_iris": val_iris, "loss_shape": val_shape},
                 lr=current_lr,
                 epoch_time=epoch_time,
             )

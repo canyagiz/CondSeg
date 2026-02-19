@@ -47,7 +47,6 @@ def main():
     print("[1/5] Instantiating CondSeg model...")
     model = CondSeg(
         img_size=IMG_SIZE,
-        tau=800.0,
         epsilon=0.01,
         pretrained=True,
     ).to(DEVICE)

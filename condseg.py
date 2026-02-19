@@ -31,7 +31,7 @@ class CondSeg(nn.Module):
 
     Args:
         img_size:    Input image spatial size (assumes square, default 1024).
-        tau:         Ellp2Mask temperature (default 800.0).
+        tau:         (Removed — Ellp2Mask now uses fixed effective_scale)
         epsilon:     Minimum relative axis length for iris (default 0.01).
         pretrained:  Whether to use pretrained EfficientNet-B3 weights.
     """
@@ -39,7 +39,6 @@ class CondSeg(nn.Module):
     def __init__(
         self,
         img_size: int = 1024,
-        tau: float = 800.0,
         epsilon: float = 0.01,
         pretrained: bool = True,
     ):
@@ -59,7 +58,7 @@ class CondSeg(nn.Module):
         )
 
         # 3. Differentiable ellipse → soft mask conversion
-        self.ellp2mask = Ellp2Mask(H=img_size, W=img_size, tau=tau)
+        self.ellp2mask = Ellp2Mask(H=img_size, W=img_size)
 
         # ---- Loss function ----
         # Using F.binary_cross_entropy_with_logits (computed on raw logits)

@@ -74,8 +74,6 @@ def parse_args():
                    help="DataLoader workers per GPU")
 
     # Model
-    p.add_argument("--tau", type=float, default=800.0,
-                   help="Ellp2Mask temperature")
     p.add_argument("--epsilon", type=float, default=0.01,
                    help="Minimum relative axis length for iris")
     p.add_argument("--pretrained", action="store_true", default=True,
@@ -486,7 +484,7 @@ def main():
         print(f"  LR           : {args.lr}")
         print(f"  AMP          : {args.amp}")
         print(f"  Logger       : {args.logger}")
-        print(f"  τ            : {args.tau}")
+        print(f"  scale        : 10.0 (fixed effective_scale)")
         print(f"  ε            : {args.epsilon}")
         print()
 
@@ -538,7 +536,6 @@ def main():
     # ---- Model ----
     model = CondSeg(
         img_size=args.img_size,
-        tau=args.tau,
         epsilon=args.epsilon,
         pretrained=args.pretrained,
     ).to(device)

@@ -11,9 +11,10 @@ Mathematical Pipeline:
     1. Compute general conic coefficients A, B, C, D, E, F
     2. Construct 3×3 ellipse matrix M (off-diagonals divided by 2!)
     3. Compute distance map D = xᵀ M x  via torch.bmm
-    4. Convert to soft mask S = Sigmoid( -D / (max(D) + 1e-6) × τ )
+    4. Convert to soft mask S = Sigmoid( -D × effective_scale )
 
-CRITICAL: max(D) is computed PER IMAGE in the batch, not globally.
+FIX: max(D) normalization removed — caused reward hacking at high res.
+NOTE: effective_scale=10.0 provides resolution-independent gradients.
 CRITICAL: M off-diagonal elements are B/2, D/2, E/2 (factor of 2).
 """
 
@@ -32,15 +33,12 @@ class Ellp2Mask(nn.Module):
     Args:
         H:   Spatial height of the output mask (default 1024).
         W:   Spatial width of the output mask (default 1024).
-        tau: Smoothness hyperparameter for the Sigmoid transition (default 800.0).
     """
 
-    def __init__(self, H: int = 1024, W: int = 1024, tau: float = 800.0, delta: float = 0.01):
+    def __init__(self, H: int = 1024, W: int = 1024):
         super().__init__()
         self.H = H
         self.W = W
-        self.tau = tau
-        self.delta = delta
 
         # ---- Pre-compute augmented coordinate grid ----
         # Pixel coordinates: y ∈ [0, H-1], x ∈ [0, W-1]
@@ -140,17 +138,14 @@ class Ellp2Mask(nn.Module):
         dist_map = dist_map.view(B, self.H, self.W)  # (B, H, W)
 
         # ---- Convert distance map to soft mask ----
-        # S = Sigmoid( -D / (max(D) + 1e-6) × τ )
-        # CRITICAL: max is computed PER IMAGE (over H×W), not globally
-        # CRITICAL: If the predicted ellipse is huge (covers entire image),
-        # all D values are negative → d_max < 0 → sigmoid sign flips.
-        # clamp(min=1e-6) prevents division by zero/negative. detach() stops
-        # gradient flow through the normalization constant.
-        d_max = dist_map.view(B, -1).max(dim=1, keepdim=True).values.clamp(min=1e-6).detach()  # (B, 1)
-        d_max = d_max.view(B, 1, 1)  # (B, 1, 1) for broadcasting over (H, W)
+        # FIX: Makaledeki max(D)'ye bölme işlemi 1024x1024'te reward hacking'e
+        # yol açıyordu — ağ, elipsi şişirerek d_max'ı düşürüp sahte beyaz maske
+        # üretmeyi öğreniyordu. Bunun yerine sabit bir ölçek katsayısı kullanıyoruz.
+        # Quadratic form D zaten eksen uzunluklarına (a, b) göre normalize olduğu
+        # için sabit scale, gradyanların doğrudan elips sınırlarına akmasını sağlar.
+        effective_scale = 10.0
+        logits = -dist_map * effective_scale  # (B, H, W)
 
-        # Raw logits (before sigmoid) — needed for BCEWithLogitsLoss
-        logits = (-dist_map / (d_max + self.delta)) * self.tau  # (B, H, W)
         soft_mask = torch.sigmoid(logits)  # (B, H, W)
 
         # Add channel dimension: (B, H, W) → (B, 1, H, W)

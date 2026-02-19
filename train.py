@@ -155,6 +155,16 @@ class TrainLogger:
                     config=vars(args),
                     resume="allow",
                 )
+                # Define independent x-axes so step-level and epoch-level
+                # metrics don't conflict (fixes monotonicity warnings).
+                wandb.define_metric("global_step")
+                wandb.define_metric("epoch")
+                wandb.define_metric("step/*",       step_metric="global_step")
+                wandb.define_metric("train/*",      step_metric="epoch")
+                wandb.define_metric("val/*",        step_metric="epoch")
+                wandb.define_metric("lr",           step_metric="epoch")
+                wandb.define_metric("epoch_time_s", step_metric="epoch")
+                wandb.define_metric("predictions/*", step_metric="epoch")
                 # Watch model gradients + parameters
                 self.use_wandb = True
                 print(f"  ✓ W&B logging → project={args.wandb_project}, run={run_name}")
@@ -180,7 +190,7 @@ class TrainLogger:
             for key, val in metrics.items():
                 self.tb_writer.add_scalar(key, val, step)
         if self.use_wandb:
-            self.wandb.log(metrics, step=step)
+            self.wandb.log({**metrics, "global_step": step})
 
     def log_epoch(self, epoch: int, train_metrics: dict, val_metrics: dict, lr: float, epoch_time: float):
         """Log epoch-level summary to both backends."""
@@ -199,7 +209,7 @@ class TrainLogger:
             for key, val in combined.items():
                 self.tb_writer.add_scalar(key, val, epoch)
         if self.use_wandb:
-            self.wandb.log(combined, step=epoch)
+            self.wandb.log(combined)  # "epoch" key already in combined dict
 
     @torch.no_grad()
     def log_predictions(self, model, dataloader, device, epoch, num_samples=4):
@@ -264,7 +274,8 @@ class TrainLogger:
                         wandb.Image(pred_vis, caption="Pred Visible Iris"),
                         wandb.Image(pred_iris, caption=f"Soft Iris | {caption}"),
                     ],
-                }, step=epoch)
+                    "epoch": epoch,
+                })
 
             if self.use_tb:
                 self.tb_writer.add_image(f"pred/sample_{log_idx}/input",

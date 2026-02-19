@@ -17,6 +17,7 @@ have already been passed through Sigmoid activations.
 
 import torch
 import torch.nn as nn
+from torch.amp import autocast
 
 from backbone import BackboneWithDecoder
 from iris_estimator import IrisEstimator
@@ -89,7 +90,10 @@ class CondSeg(nn.Module):
         # iris_params: (B, 5) — [x0, y0, a, b, θ]
 
         # ---- Step 3: Ellp2Mask → soft iris mask ----
-        soft_iris_mask = self.ellp2mask(iris_params)
+        # CRITICAL: Force float32 to prevent AMP float16 overflow.
+        # Pixel coords up to 1024 → x² ≈ 1,046,529 > float16 max (65504)
+        with autocast('cuda', enabled=False):
+            soft_iris_mask = self.ellp2mask(iris_params.float())
         # soft_iris_mask: (B, 1, H, W)
 
         # ---- Step 4: Conditioned Assemble ----

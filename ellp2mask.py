@@ -141,7 +141,10 @@ class Ellp2Mask(nn.Module):
         # ---- Convert distance map to soft mask ----
         # S = Sigmoid( -D / (max(D) + 1e-6) × τ )
         # CRITICAL: max is computed PER IMAGE (over H×W), not globally
-        d_max = dist_map.view(B, -1).max(dim=1, keepdim=True).values  # (B, 1)
+        # CRITICAL: If the predicted ellipse is huge (covers entire image),
+        # all D values are negative → d_max < 0 → sigmoid sign flips.
+        # Clamp to 0 prevents this. Detach prevents gradient through normalization.
+        d_max = dist_map.view(B, -1).max(dim=1, keepdim=True).values.clamp(min=0.0).detach()  # (B, 1)
         d_max = d_max.view(B, 1, 1)  # (B, 1, 1) for broadcasting over (H, W)
 
         # Normalize and apply sigmoid with temperature τ

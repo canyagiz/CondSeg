@@ -60,14 +60,15 @@ class Ellp2Mask(nn.Module):
         # Register as buffer — not a parameter, but moves to GPU with model
         self.register_buffer("coords", coords)  # (3, H*W)
 
-    def forward(self, params: torch.Tensor) -> torch.Tensor:
+    def forward(self, params: torch.Tensor):
         """
         Args:
             params: (B, 5) — absolute ellipse parameters [x0, y0, a, b, θ]
                     x0, y0 in pixel coords; a, b in pixels; θ in radians
 
         Returns:
-            soft_mask: (B, 1, H, W) — differentiable soft segmentation mask
+            soft_mask: (B, 1, H, W) — sigmoid-activated soft segmentation mask
+            logits:    (B, 1, H, W) — raw logits before sigmoid (for BCEWithLogitsLoss)
         """
         B = params.shape[0]
 
@@ -143,16 +144,17 @@ class Ellp2Mask(nn.Module):
         # CRITICAL: max is computed PER IMAGE (over H×W), not globally
         # CRITICAL: If the predicted ellipse is huge (covers entire image),
         # all D values are negative → d_max < 0 → sigmoid sign flips.
-        # Clamp to 0 prevents this. Detach prevents gradient through normalization.
-        d_max = dist_map.view(B, -1).max(dim=1, keepdim=True).values.clamp(min=0.0).detach()  # (B, 1)
+        # clamp(min=1e-6) prevents division by zero/negative. detach() stops
+        # gradient flow through the normalization constant.
+        d_max = dist_map.view(B, -1).max(dim=1, keepdim=True).values.clamp(min=1e-6).detach()  # (B, 1)
         d_max = d_max.view(B, 1, 1)  # (B, 1, 1) for broadcasting over (H, W)
 
-        # Normalize and apply sigmoid with temperature τ
-        soft_mask = torch.sigmoid(
-            (-dist_map / (d_max + self.delta)) * self.tau
-        )  # (B, H, W)
+        # Raw logits (before sigmoid) — needed for BCEWithLogitsLoss
+        logits = (-dist_map / (d_max + self.delta)) * self.tau  # (B, H, W)
+        soft_mask = torch.sigmoid(logits)  # (B, H, W)
 
         # Add channel dimension: (B, H, W) → (B, 1, H, W)
+        logits = logits.unsqueeze(1)      # (B, 1, H, W)
         soft_mask = soft_mask.unsqueeze(1)  # (B, 1, H, W)
 
-        return soft_mask
+        return soft_mask, logits

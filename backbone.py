@@ -147,4 +147,4 @@ class BackboneWithDecoder(nn.Module):
         # Apply Sigmoid to get probability map in [0, 1]
         predicted_eye_region_mask = torch.sigmoid(logits)  # (B, 1, H, W)
 
-        return predicted_eye_region_mask, deepest
+        return predicted_eye_region_mask, logits, deepest

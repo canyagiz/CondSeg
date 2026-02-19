@@ -5,18 +5,19 @@ Connects the Backbone+Decoder (eye-region segmenter), IrisEstimator,
 and Ellp2Mask into a single end-to-end differentiable pipeline.
 
 Training forward pass:
-    1. Encode image → eye-region mask + deepest features
+    1. Encode image → eye-region mask + logits + deepest features
     2. Estimate iris ellipse params from deepest features
-    3. Ellp2Mask → soft iris mask
+    3. Ellp2Mask → soft iris mask + logits
     4. Conditioned Assemble: predicted_visible_iris = soft_iris_mask × eye_region_mask
-    5. Loss = BCE(eye_region, GT) + BCE(visible_iris, GT)
+    5. Loss = BCEWithLogits(eye_logits, GT) + masked BCEWithLogits(iris_logits, GT)
 
-CRITICAL: Uses nn.BCELoss (NOT BCEWithLogitsLoss) because all masks
-have already been passed through Sigmoid activations.
+CRITICAL: Uses F.binary_cross_entropy_with_logits on raw logits (not
+sigmoid outputs) to prevent vanishing gradients from sigmoid saturation.
 """
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.amp import autocast
 
 from backbone import BackboneWithDecoder
@@ -61,8 +62,9 @@ class CondSeg(nn.Module):
         self.ellp2mask = Ellp2Mask(H=img_size, W=img_size, tau=tau)
 
         # ---- Loss function ----
-        # CRITICAL: BCELoss, NOT BCEWithLogitsLoss — outputs already have Sigmoid
-        self.bce_loss = nn.BCELoss()
+        # Using F.binary_cross_entropy_with_logits (computed on raw logits)
+        # instead of nn.BCELoss to prevent vanishing gradients from
+        # sigmoid saturation (sigmoid(large) = 1.0 → gradient = 0).
 
     def forward(self, images: torch.Tensor):
         """
@@ -80,33 +82,35 @@ class CondSeg(nn.Module):
         """
         B, C, H, W = images.shape
 
-        # ---- Step 1: Backbone → eye-region mask + deepest features ----
-        predicted_eye_region_mask, deepest_features = self.backbone(images)
-        # predicted_eye_region_mask: (B, 1, H, W) — already Sigmoid-activated
+        # ---- Step 1: Backbone → eye-region mask + logits + deepest features ----
+        predicted_eye_region_mask, eye_region_logits, deepest_features = self.backbone(images)
+        # predicted_eye_region_mask: (B, 1, H, W) — Sigmoid-activated
+        # eye_region_logits:         (B, 1, H, W) — raw logits (for loss)
         # deepest_features:          (B, 1536, h, w)
 
         # ---- Step 2: Iris Estimator → 5D absolute ellipse params ----
         iris_params = self.iris_estimator(deepest_features, H, W)
         # iris_params: (B, 5) — [x0, y0, a, b, θ]
 
-        # ---- Step 3: Ellp2Mask → soft iris mask ----
+        # ---- Step 3: Ellp2Mask → soft iris mask + logits ----
         # CRITICAL: Force float32 to prevent AMP float16 overflow.
         # Pixel coords up to 1024 → x² ≈ 1,046,529 > float16 max (65504)
         with autocast('cuda', enabled=False):
-            soft_iris_mask = self.ellp2mask(iris_params.float())
+            soft_iris_mask, iris_logits = self.ellp2mask(iris_params.float())
         # soft_iris_mask: (B, 1, H, W)
+        # iris_logits:    (B, 1, H, W) — raw logits (for loss)
 
         # ---- Step 4: Conditioned Assemble ----
         # Visibility of iris is conditioned on the eye-region being open.
-        # CRITICAL: We detach() the eye mask here to decouple training.
-        # This prevents the iris loss from "fighting" the eye loss and
-        # destroying the eye mask to reduce iris error.
+        # CRITICAL: detach() decouples training — iris loss cannot destroy eye mask.
         predicted_visible_iris = soft_iris_mask * predicted_eye_region_mask.detach()
         # predicted_visible_iris: (B, 1, H, W)
 
         return {
             "predicted_eye_region_mask": predicted_eye_region_mask,
+            "eye_region_logits": eye_region_logits,
             "soft_iris_mask": soft_iris_mask,
+            "iris_logits": iris_logits,
             "predicted_visible_iris": predicted_visible_iris,
             "iris_params": iris_params,
         }
@@ -118,39 +122,40 @@ class CondSeg(nn.Module):
         gt_visible_iris: torch.Tensor,
     ) -> dict:
         """
-        Compute the CondSeg training loss.
+        Compute the CondSeg training loss using BCEWithLogitsLoss.
+
+        Using logits (before sigmoid) prevents vanishing gradients when
+        sigmoid saturates at 0.0 or 1.0 (gradient becomes exactly zero).
 
         Args:
-            outputs:         dict from forward() with predicted masks
+            outputs:         dict from forward() with predicted masks and logits
             gt_eye_region:   (B, 1, H, W) float32 — binary GT (sclera|iris|pupil)
             gt_visible_iris: (B, 1, H, W) float32 — binary GT (iris|pupil)
 
         Returns:
             dict with keys:
                 'loss_eye':   scalar — BCE loss for eye-region segmentation
-                'loss_iris':  scalar — BCE loss for conditioned iris segmentation
+                'loss_iris':  scalar — masked BCE loss for iris estimation
                 'total_loss': scalar — sum of both losses
         """
-        # ---- Cast to float32 for BCELoss (unsafe under AMP autocast) ----
-        pred_eye  = outputs["predicted_eye_region_mask"].float()
-        pred_iris = outputs["predicted_visible_iris"].float()
-        gt_eye_f  = gt_eye_region.float()
-        gt_iris_f = gt_visible_iris.float()
+        # ---- Get logits (NOT sigmoid outputs) for stable gradient flow ----
+        eye_logits  = outputs["eye_region_logits"].float()
+        iris_logits = outputs["iris_logits"].float()
+        gt_eye_f    = gt_eye_region.float()
+        gt_iris_f   = gt_visible_iris.float()
 
-        # ---- Loss_Eye = BCE(predicted_eye_region, GT_Eye_Region) ----
-        loss_eye = self.bce_loss(pred_eye, gt_eye_f)
+        # ---- Loss_Eye = BCEWithLogits(eye_logits, GT_Eye_Region) ----
+        loss_eye = F.binary_cross_entropy_with_logits(eye_logits, gt_eye_f)
 
-        # ---- Loss_Iris = BCE only INSIDE eye-region (per paper Sec. 3.1) ----
-        # Paper: "eye-region mask is used as an ignorance mask, where only
-        # pixels inside the eye-region calculate loss and back-propagate
-        # gradients, while the ones outside eye-region are regarded as ignored."
-        eye_mask = gt_eye_f  # (B, 1, H, W) — binary mask
+        # ---- Loss_Iris = masked BCEWithLogits (only inside GT eye-region) ----
+        # Paper Sec. 3.1: "eye-region mask is used as an ignorance mask"
+        # weight= parameter zeroes out loss for pixels outside eye-region.
+        eye_mask = gt_eye_f  # (B, 1, H, W) — binary condition mask
         num_eye_pixels = eye_mask.sum().clamp(min=1.0)
 
-        # Manual BCE with masking (nn.BCELoss doesn't support per-pixel masking)
-        bce_per_pixel = -(gt_iris_f * torch.log(pred_iris + 1e-7)
-                          + (1 - gt_iris_f) * torch.log(1 - pred_iris + 1e-7))
-        loss_iris = (bce_per_pixel * eye_mask).sum() / num_eye_pixels
+        loss_iris = F.binary_cross_entropy_with_logits(
+            iris_logits, gt_iris_f, weight=eye_mask, reduction='sum'
+        ) / num_eye_pixels
 
         # ---- Total Loss ----
         total_loss = loss_eye + loss_iris

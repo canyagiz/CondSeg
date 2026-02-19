@@ -93,8 +93,11 @@ class CondSeg(nn.Module):
         # soft_iris_mask: (B, 1, H, W)
 
         # ---- Step 4: Conditioned Assemble ----
-        # Visibility of iris is conditioned on the eye-region being open
-        predicted_visible_iris = soft_iris_mask * predicted_eye_region_mask
+        # Visibility of iris is conditioned on the eye-region being open.
+        # CRITICAL: We detach() the eye mask here to decouple training.
+        # This prevents the iris loss from "fighting" the eye loss and
+        # destroying the eye mask to reduce iris error.
+        predicted_visible_iris = soft_iris_mask * predicted_eye_region_mask.detach()
         # predicted_visible_iris: (B, 1, H, W)
 
         return {

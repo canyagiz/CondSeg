@@ -35,11 +35,12 @@ class Ellp2Mask(nn.Module):
         tau: Smoothness hyperparameter for the Sigmoid transition (default 800.0).
     """
 
-    def __init__(self, H: int = 1024, W: int = 1024, tau: float = 800.0):
+    def __init__(self, H: int = 1024, W: int = 1024, tau: float = 800.0, delta: float = 0.01):
         super().__init__()
         self.H = H
         self.W = W
         self.tau = tau
+        self.delta = delta
 
         # ---- Pre-compute augmented coordinate grid ----
         # Pixel coordinates: y ∈ [0, H-1], x ∈ [0, W-1]
@@ -145,7 +146,7 @@ class Ellp2Mask(nn.Module):
 
         # Normalize and apply sigmoid with temperature τ
         soft_mask = torch.sigmoid(
-            (-dist_map / (d_max + 1e-6)) * self.tau
+            (-dist_map / (d_max + self.delta)) * self.tau
         )  # (B, H, W)
 
         # Add channel dimension: (B, H, W) → (B, 1, H, W)

@@ -7,12 +7,12 @@ and an MLP to regress 5D elliptical parameters for the full iris.
 Output: normalized parameters in (0, 1) via Sigmoid, then converted
 to absolute pixel coordinates.
 
-Conversion (exactly per user specification):
+Conversion (per paper Eq. 2):
     x0 = x̂0 × W
     y0 = ŷ0 × H
     a  = (â + ε) × min(W, H) / 2
     b  = (b̂ + ε) × min(W, H) / 2
-    θ  = θ̂ × π              (maps [0,1] → [0, π])
+    θ  = θ̂                   (raw sigmoid output, range [0, 1])
 
     ε = 0.01 for iris (prevents degenerate zero-length axes)
 """
@@ -94,7 +94,7 @@ class IrisEstimator(nn.Module):
         y0 = y_hat * H                                 # pixel y-center
         a  = (a_hat + self.epsilon) * min_dim / 2.0     # semi-major axis (pixels)
         b  = (b_hat + self.epsilon) * min_dim / 2.0     # semi-minor axis (pixels)
-        theta = t_hat * math.pi                         # angle in [0, π] radians
+        theta = t_hat                                   # angle (raw sigmoid, [0, 1]) per paper Eq. 2
 
         # Stack back to (B, 5)
         params_abs = torch.stack([x0, y0, a, b, theta], dim=1)  # (B, 5)

@@ -133,8 +133,17 @@ class CondSeg(nn.Module):
         # ---- Loss_Eye = BCE(predicted_eye_region, GT_Eye_Region) ----
         loss_eye = self.bce_loss(pred_eye, gt_eye_f)
 
-        # ---- Loss_Iris = BCE(predicted_visible_iris, GT_Visible_Iris) ----
-        loss_iris = self.bce_loss(pred_iris, gt_iris_f)
+        # ---- Loss_Iris = BCE only INSIDE eye-region (per paper Sec. 3.1) ----
+        # Paper: "eye-region mask is used as an ignorance mask, where only
+        # pixels inside the eye-region calculate loss and back-propagate
+        # gradients, while the ones outside eye-region are regarded as ignored."
+        eye_mask = gt_eye_f  # (B, 1, H, W) — binary mask
+        num_eye_pixels = eye_mask.sum().clamp(min=1.0)
+
+        # Manual BCE with masking (nn.BCELoss doesn't support per-pixel masking)
+        bce_per_pixel = -(gt_iris_f * torch.log(pred_iris + 1e-7)
+                          + (1 - gt_iris_f) * torch.log(1 - pred_iris + 1e-7))
+        loss_iris = (bce_per_pixel * eye_mask).sum() / num_eye_pixels
 
         # ---- Total Loss ----
         total_loss = loss_eye + loss_iris

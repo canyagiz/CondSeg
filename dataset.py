@@ -261,6 +261,10 @@ class EyeSegmentationDataset(Dataset):
     Geometric augmentations boş alanları siyahla değil ten rengine
     uyumlu gradient fill ile doldurur.
 
+    aug_copies > 0 ise her epoch'ta orijinal görseller (sadece resize+normalize)
+    + aug_copies adet augmented kopya birlikte kullanılır.
+    Örnek: 181 pair + aug_copies=3 → 181 + 543 = 724 sample/epoch.
+
     Directory structure:
         data/<split>/images/*.jpg
         data/<split>/masks/*.png     (single-channel, values {0,1,2,3})
@@ -276,10 +280,12 @@ class EyeSegmentationDataset(Dataset):
     IMAGENET_MEAN = [0.485, 0.456, 0.406]
     IMAGENET_STD  = [0.229, 0.224, 0.225]
 
-    def __init__(self, data_root: str, img_size: int = 1024, augment: bool = False):
+    def __init__(self, data_root: str, img_size: int = 1024,
+                 augment: bool = False, aug_copies: int = 0):
         super().__init__()
-        self.img_size = img_size
-        self.augment  = augment
+        self.img_size   = img_size
+        self.augment    = augment
+        self.aug_copies = aug_copies if augment else 0
 
         image_dir = os.path.join(data_root, "images")
         mask_dir  = os.path.join(data_root, "masks")
@@ -297,11 +303,22 @@ class EyeSegmentationDataset(Dataset):
         ]
 
         assert len(self.pairs) > 0, f"No image-mask pairs found in {data_root}"
-        print(f"  Dataset: {len(self.pairs)} pairs from {data_root} (augment={augment})")
+        n_orig = len(self.pairs)
+        n_total = n_orig * (1 + self.aug_copies)
+        print(f"  Dataset: {n_orig} pairs from {data_root} "
+              f"(augment={augment}, aug_copies={self.aug_copies}, "
+              f"effective={n_total}/epoch)")
 
-        # ---- Augmentation pipeline ----
+        # ---- Base transform (orijinaller için — sadece resize + normalize) ----
+        self.base_transform = A.Compose([
+            A.Resize(img_size, img_size, interpolation=cv2.INTER_LINEAR),
+            A.Normalize(mean=self.IMAGENET_MEAN, std=self.IMAGENET_STD),
+            ToTensorV2(),
+        ])
+
+        # ---- Augmentation pipeline (augmented kopyalar için) ----
         if augment:
-            self.transform = A.Compose([
+            self.aug_transform = A.Compose([
                 A.Resize(img_size, img_size, interpolation=cv2.INTER_AREA),
 
                 # === Geometric ===
@@ -309,19 +326,20 @@ class EyeSegmentationDataset(Dataset):
 
                 # ↓ Siyah dolgu YOK — gradient fill kullanır
                 SmartFillShiftScaleRotate(
-                    shift_limit=0.05,
-                    scale_limit=0.15,
-                    rotate_limit=15,
+                    shift_limit=0.08,
+                    scale_limit=0.20,
+                    rotate_limit=20,
                     interpolation=cv2.INTER_LINEAR,
                     p=0.7,
                 ),
                 A.RandomResizedCrop(
                     size=(img_size, img_size),
-                    scale=(0.8, 1.0),
-                    ratio=(0.9, 1.1),
+                    scale=(0.5, 1.0),
+                    ratio=(0.85, 1.15),
                     interpolation=cv2.INTER_LINEAR,
-                    p=0.5,
+                    p=0.6,
                 ),
+                A.Perspective(scale=(0.02, 0.06), p=0.2),
                 # ↓ Siyah dolgu YOK — gradient fill kullanır
                 SmartFillElasticTransform(
                     alpha=30,
@@ -330,14 +348,24 @@ class EyeSegmentationDataset(Dataset):
                 ),
 
                 # === Photometric (image only) ===
-                A.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.05, p=0.8),
-                A.RandomGamma(gamma_limit=(70, 150), p=0.4),
+                A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=0.3),
+                A.ColorJitter(brightness=0.35, contrast=0.35, saturation=0.25, hue=0.08, p=0.8),
+                A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=0.5),
+                A.RandomGamma(gamma_limit=(60, 160), p=0.4),
                 A.OneOf([
                     A.GaussianBlur(blur_limit=(3, 7), p=1.0),
                     A.MotionBlur(blur_limit=(3, 15), p=1.0),
                     A.MedianBlur(blur_limit=5, p=1.0),
                 ], p=0.5),
-                A.GaussNoise(std_range=(0.01, 0.04), p=0.4),
+                A.Downscale(scale_range=(0.5, 0.75), p=0.2),
+                A.GaussNoise(std_range=(0.01, 0.05), p=0.4),
+                A.CoarseDropout(
+                    num_holes_range=(1, 4),
+                    hole_height_range=(int(img_size * 0.02), int(img_size * 0.08)),
+                    hole_width_range=(int(img_size * 0.02), int(img_size * 0.08)),
+                    fill=0,
+                    p=0.3,
+                ),
                 A.ToGray(p=0.1),
 
                 # === Normalize + tensor ===
@@ -345,14 +373,10 @@ class EyeSegmentationDataset(Dataset):
                 ToTensorV2(),
             ])
         else:
-            self.transform = A.Compose([
-                A.Resize(img_size, img_size, interpolation=cv2.INTER_LINEAR),
-                A.Normalize(mean=self.IMAGENET_MEAN, std=self.IMAGENET_STD),
-                ToTensorV2(),
-            ])
+            self.aug_transform = self.base_transform
 
     def __len__(self) -> int:
-        return len(self.pairs)
+        return len(self.pairs) * (1 + self.aug_copies)
 
     def __getitem__(self, idx: int):
         """
@@ -361,13 +385,18 @@ class EyeSegmentationDataset(Dataset):
             gt_eye_region   : (1, H, W) float32
             gt_visible_iris : (1, H, W) float32
         """
-        img_path, mask_path = self.pairs[idx]
+        n_orig = len(self.pairs)
+        real_idx = idx % n_orig
+        use_aug = idx >= n_orig  # ilk N orijinal, sonraki N*aug_copies augmented
+
+        img_path, mask_path = self.pairs[real_idx]
 
         image = cv2.imread(img_path, cv2.IMREAD_COLOR)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         mask  = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
 
-        result = self.transform(image=image, mask=mask)
+        transform = self.aug_transform if use_aug else self.base_transform
+        result = transform(image=image, mask=mask)
         image  = result["image"]    # (3, H, W) float32 tensor
         mask   = result["mask"]     # (H, W) uint8 numpy
 

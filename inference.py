@@ -7,8 +7,9 @@ drawn directly on top (exactly what the model sees).
 
 Usage:
     python inference.py --checkpoint best.pt --video path/to/video.mov
-    python inference.py --checkpoint best.pt --video path/to/video.mov --output result.mp4
-    python inference.py --checkpoint best.pt --video path/to/video.mov --no-display
+    python inference.py --checkpoint best.pt --video path/to/video.mov --save_video
+    python inference.py --checkpoint best.pt --video path/to/video.mov --no_display --half
+    python inference.py --checkpoint best.pt --video path/to/video.mov --output_dir results/
 """
 
 import argparse
@@ -33,16 +34,22 @@ IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 def parse_args():
     p = argparse.ArgumentParser(description="CondSeg Video Inference")
-    p.add_argument("--checkpoint", type=str, default="best.pt",
+    p.add_argument("--checkpoint", type=str, default="models/best_2.pt",
                    help="Path to trained checkpoint (.pt)")
     p.add_argument("--video", type=str, required=True,
                    help="Path to input video file")
     p.add_argument("--output", type=str, default=None,
-                   help="Path to save output video (default: input_condseg.mp4)")
+                   help="Path to save output video (default: input_condseg.avi)")
+    p.add_argument("--output_dir", type=str, default=None,
+                   help="Directory to save CSV signals (default: next to video)")
     p.add_argument("--img_size", type=int, default=1024,
                    help="Model input resolution (must match training)")
-    p.add_argument("--no-display", action="store_true",
+    p.add_argument("--save_video", action="store_true",
+                   help="Save overlay video to disk")
+    p.add_argument("--no-display", "--no_display", action="store_true",
                    help="Disable live window display")
+    p.add_argument("--half", action="store_true",
+                   help="Use FP16 (half precision) for faster inference")
     p.add_argument("--device", type=str, default=None,
                    help="Device: cuda or cpu (auto-detect if omitted)")
     return p.parse_args()
@@ -155,6 +162,12 @@ def main():
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # ── Resolve output directory ──
+    video_basename = os.path.splitext(os.path.basename(args.video))[0]
+    if args.output_dir is None:
+        args.output_dir = os.path.dirname(os.path.abspath(args.video))
+    os.makedirs(args.output_dir, exist_ok=True)
+
     print("=" * 60)
     print("CondSeg Video Inference")
     print("=" * 60)
@@ -162,10 +175,16 @@ def main():
     print(f"  Checkpoint : {args.checkpoint}")
     print(f"  Video      : {args.video}")
     print(f"  Img size   : {args.img_size}")
+    print(f"  Half (FP16): {args.half}")
+    print(f"  Save video : {args.save_video}")
+    print(f"  Output dir : {args.output_dir}")
     print()
 
     # ── Load model ──
     model = load_model(args.checkpoint, args.img_size, device)
+    if args.half and device.type == "cuda":
+        model = model.half()
+        print("  ✓ Model converted to FP16 (half precision)")
 
     # ── Open video ──
     cap = cv2.VideoCapture(args.video)
@@ -179,23 +198,24 @@ def main():
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     print(f"  Video      : {W}×{H} @ {fps:.1f} FPS, {total} frames")
 
-    # ── Output video writer (1024×1024, XVID — works everywhere) ──
-    if args.output is None:
-        base = os.path.splitext(args.video)[0]
-        args.output = base + "_condseg.avi"
-
-    fourcc = cv2.VideoWriter_fourcc(*"XVID")
-    out_writer = cv2.VideoWriter(args.output, fourcc, fps,
-                                 (args.img_size, args.img_size))
-    if not out_writer.isOpened():
-        print("ERROR: Cannot open VideoWriter. Check codec support.")
-        sys.exit(1)
-    print(f"  Output     : {args.output}  ({args.img_size}×{args.img_size})")
+    # ── Output video writer (optional) ──
+    out_writer = None
+    if args.save_video:
+        if args.output is None:
+            args.output = os.path.join(args.output_dir, video_basename + "_condseg.avi")
+        fourcc = cv2.VideoWriter_fourcc(*"XVID")
+        out_writer = cv2.VideoWriter(args.output, fourcc, fps,
+                                     (args.img_size, args.img_size))
+        if not out_writer.isOpened():
+            print("ERROR: Cannot open VideoWriter. Check codec support.")
+            sys.exit(1)
+        print(f"  Video out  : {args.output}  ({args.img_size}×{args.img_size})")
     print()
 
     # ── Inference loop ──
     frame_idx = 0
     t_start = time.time()
+    all_params = []  # collect (x0, y0, a, b, theta) per frame
 
     with torch.no_grad():
         while True:
@@ -208,21 +228,24 @@ def main():
 
             # Preprocess + forward
             tensor = preprocess_square(square).to(device)
-            with autocast("cuda", enabled=(device.type == "cuda")):
-                outputs = model(tensor)
+            if args.half:
+                tensor = tensor.half()
+            outputs = model(tensor)
 
-            # Draw overlays on the 1024×1024 image
-            vis = draw_overlay(square, outputs)
+            # Collect ellipse params
+            iris_params = outputs["iris_params"][0].cpu().numpy()
+            all_params.append(iris_params.copy())
 
-            # Write
-            out_writer.write(vis)
-
-            # Display
-            if not args.no_display:
-                cv2.imshow("CondSeg Inference", vis)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    print("\n  Interrupted by user (q)")
-                    break
+            # Draw + display / write
+            if not args.no_display or out_writer is not None:
+                vis = draw_overlay(square, outputs)
+                if out_writer is not None:
+                    out_writer.write(vis)
+                if not args.no_display:
+                    cv2.imshow("CondSeg Inference", vis)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        print("\n  Interrupted by user (q)")
+                        break
 
             frame_idx += 1
             if frame_idx % 30 == 0:
@@ -234,14 +257,27 @@ def main():
 
     # ── Cleanup ──
     cap.release()
-    out_writer.release()
+    if out_writer is not None:
+        out_writer.release()
     if not args.no_display:
         cv2.destroyAllWindows()
 
+    # ── Save ellipse params as separate .npy signals ──
+    if len(all_params) > 0:
+        params_array = np.array(all_params)  # (N, 5)
+        signal_names = ["x0", "y0", "a", "b", "theta_rad"]
+        print()
+        for i, name in enumerate(signal_names):
+            npy_path = os.path.join(args.output_dir, f"{video_basename}_{name}.npy")
+            np.save(npy_path, params_array[:, i])
+            print(f"  ✓ {name:>9s} → {npy_path}  ({len(all_params)} samples)")
+
+
     elapsed = time.time() - t_start
     avg_fps = frame_idx / elapsed if elapsed > 0 else 0
-    print(f"\n\n  Done! {frame_idx} frames in {elapsed:.1f}s ({avg_fps:.1f} FPS)")
-    print(f"  Output saved to: {args.output}")
+    print(f"\n  Done! {frame_idx} frames in {elapsed:.1f}s ({avg_fps:.1f} FPS)")
+    if out_writer is not None:
+        print(f"  Video saved to: {args.output}")
 
 
 if __name__ == "__main__":

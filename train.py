@@ -91,6 +91,10 @@ def parse_args():
     p.add_argument("--grad_accum", type=int, default=1,
                    help="Gradient accumulation steps (effective BS = batch_size * grad_accum * num_gpus)")
 
+    # Data augmentation
+    p.add_argument("--aug_copies", type=int, default=3,
+                   help="Number of augmented copies per original image per epoch (0=replace mode)")
+
     # Checkpointing / Logging
     p.add_argument("--save_dir", type=str, default="checkpoints",
                    help="Directory to save checkpoints")
@@ -492,6 +496,7 @@ def main():
         print(f"  LR           : {args.lr}")
         print(f"  AMP          : {args.amp}")
         print(f"  Logger       : {args.logger}")
+        print(f"  Aug copies   : {args.aug_copies}")
         print(f"  scale        : 50.0 (fixed effective_scale)")
         print(f"  ε            : {args.epsilon}")
         print()
@@ -504,6 +509,7 @@ def main():
         data_root=os.path.join(args.data_root, "train"),
         img_size=args.img_size,
         augment=True,
+        aug_copies=args.aug_copies,
     )
     val_dataset = EyeSegmentationDataset(
         data_root=os.path.join(args.data_root, "valid"),

@@ -6,3 +6,6 @@ __pycache__
 *.jpg
 *.txt
 *.pt
+*.mov
+.vscode
+*output_dir

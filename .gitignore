@@ -9,3 +9,5 @@ __pycache__
 *.mov
 .vscode
 *output_dir
+*.csv
+*.xlsx

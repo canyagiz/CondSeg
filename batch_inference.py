@@ -38,7 +38,7 @@ import torch.multiprocessing as mp
 
 # -- Paths --
 MANIFEST_CSV     = "./glaucot-data-storage/simulation-benchmark/manifest.csv"
-CHECKPOINT       = "./models/CNN/best_3.pt"
+CHECKPOINT       = "./CondSeg/models/CNN/best_3.pt"
 BASE_VIDEO_DIR   = "./glaucot-data-storage/simulation-benchmark"  # prefix stripped from CSV paths
 
 # -- Model --

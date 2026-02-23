@@ -1,4 +1,3 @@
----
 # CondSeg-PyTorch: Ellipse Estimation via Conditioned Segmentation (Extended for RGB)
 
 ## Overview

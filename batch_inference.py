@@ -43,7 +43,7 @@ BASE_VIDEO_DIR   = "./glaucot-data-storage/simulation-benchmark"  # prefix strip
 
 # -- Model --
 IMG_SIZE         = 1024
-USE_AMP          = True        # automatic mixed precision (safe FP16 on A100)
+USE_AMP          = False       # KEEP FALSE! FP16 quantizes iris params (~254px → 0.125 steps)
 
 # -- Signal Processing --
 SAMPLE_RATE      = 60          # 60 FPS simulation videos
@@ -315,28 +315,56 @@ def run_inference_on_video(model, video_path: str, output_dir: str,
     all_params = []
     t_start = time.time()
 
+    # Profiling accumulators (reset every 100 frames)
+    prof = {"decode": 0, "letterbox": 0, "preprocess": 0, "transfer": 0, "model": 0}
+    prof_interval = 100
+
     with torch.no_grad():
         while True:
+            t0 = time.time()
             ret, frame = cap.read()
             if not ret:
                 break
+            t1 = time.time()
 
-            # Letterbox → 1024×1024
             square = letterbox_frame(frame, img_size)
+            t2 = time.time()
 
-            # Preprocess + forward
-            tensor = preprocess_square(square).to(device)
+            tensor = preprocess_square(square)
+            t3 = time.time()
+
+            tensor = tensor.to(device)
+            t4 = time.time()
 
             if use_amp and device.type == "cuda":
                 with torch.amp.autocast("cuda"):
                     outputs = model(tensor)
             else:
                 outputs = model(tensor)
+            torch.cuda.synchronize(device)
+            t5 = time.time()
 
-            # Collect ellipse params
             iris_params = outputs["iris_params"][0].cpu().float().numpy()
             all_params.append(iris_params.copy())
             frame_idx += 1
+
+            # Accumulate profiling
+            prof["decode"]     += (t1 - t0)
+            prof["letterbox"]  += (t2 - t1)
+            prof["preprocess"] += (t3 - t2)
+            prof["transfer"]   += (t4 - t3)
+            prof["model"]      += (t5 - t4)
+
+            # Print breakdown every N frames (only first video per worker)
+            if frame_idx == prof_interval:
+                total_prof = sum(prof.values())
+                print(f"  [GPU-{device.index}] ── Timing breakdown ({prof_interval} frames) ──")
+                for k, v in prof.items():
+                    pct = v / total_prof * 100
+                    ms = v / prof_interval * 1000
+                    print(f"    {k:>12s}: {ms:5.1f} ms/frame ({pct:4.1f}%)")
+                print(f"    {'TOTAL':>12s}: {total_prof / prof_interval * 1000:.1f} ms/frame "
+                      f"→ {prof_interval / total_prof:.1f} FPS")
 
     cap.release()
 
@@ -402,7 +430,7 @@ def gpu_worker(gpu_id: int, task_queue: mp.Queue, result_queue: mp.Queue,
     torch.cuda.set_device(device)
 
     print(f"\n  [GPU-{gpu_id}] Starting worker on {torch.cuda.get_device_name(gpu_id)}")
-    print(f"  [GPU-{gpu_id}] VRAM: {torch.cuda.get_device_properties(gpu_id).total_mem / 1e9:.1f} GB")
+    print(f"  [GPU-{gpu_id}] VRAM: {torch.cuda.get_device_properties(gpu_id).total_memory / 1e9:.1f} GB")
 
     # Load model on this GPU
     model = load_model(CHECKPOINT, IMG_SIZE, device)
@@ -780,7 +808,7 @@ def main():
 
     for i in range(actual_gpus):
         name = torch.cuda.get_device_name(i)
-        mem = torch.cuda.get_device_properties(i).total_mem / 1e9
+        mem = torch.cuda.get_device_properties(i).total_memory / 1e9
         print(f"  GPU-{i}: {name} ({mem:.1f} GB)")
     print()
 

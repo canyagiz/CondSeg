@@ -27,12 +27,10 @@ While the original paper focused on infrared (IR) images from AR/VR headsets lik
 
 The architecture relies on decoupling the prediction of the eye-region mask from the pupil/iris ellipses.
 
-1. 
-**Eye-Region Segmenter:** A dense-block based encoder-decoder extracts image features and predicts the pixel-wise eye-region mask (sclera + visible iris + visible pupil).
+1. **Eye-Region Segmenter:** A dense-block based encoder-decoder extracts image features and predicts the pixel-wise eye-region mask (sclera + visible iris + visible pupil).
 
 
-2. 
-**Iris & Pupil Estimators:** The encoded features are passed through multi-layer perceptrons (MLPs) to predict normalized 5D elliptical parameters. The full-pupil estimation is bounded by cropping the full-iris Region of Interest (RoI) to force the network to focus on the relative location and scale.
+2. **Iris & Pupil Estimators:** The encoded features are passed through multi-layer perceptrons (MLPs) to predict normalized 5D elliptical parameters. The full-pupil estimation is bounded by cropping the full-iris Region of Interest (RoI) to force the network to focus on the relative location and scale.
 
 
 3. **Differentiable Mask Conversion:** To train without 5D ground-truth labels, the predicted parameters are converted into a general ellipse matrix format:
@@ -86,6 +84,12 @@ print(f"Predicted Limbus (Iris) Radius (a, b): {iris_params['a']}, {iris_params[
 ## Training Data & Augmentation Note
 
 The provided pre-trained weights were achieved using 270 manually annotated RGB frames. To reproduce the sub-pixel accuracy, your dataloader must implement the required aggressive augmentation strategies (spatial transformations, noise injection, and color jittering) to prevent overfitting on small datasets while preserving the geometric integrity of the elliptical labels.
+
+## Examples from Validation Dataset
+
+| | | |
+|:---:|:---:|:---:|
+| ![Example 1](assets/examples/val_example_1.png) | ![Example 2](assets/examples/val_example_2.png) | ![Example 3](assets/examples/val_example_3.png) |
 
 ## Legal & Intellectual Property Disclaimer
 

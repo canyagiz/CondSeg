@@ -37,7 +37,7 @@ import torch.multiprocessing as mp
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # -- Paths --
-MANIFEST_CSV     = "./glaucot-data-storage/simulation-benchmark/simulation-benchmark_manifest.csv"
+MANIFEST_CSV     = "./glaucot-data-storage/simulation-benchmark/manifest.csv"
 CHECKPOINT       = "./models/CNN/best_3.pt"
 BASE_VIDEO_DIR   = "./glaucot-data-storage/simulation-benchmark"  # prefix stripped from CSV paths
 
@@ -215,13 +215,168 @@ def letterbox_frame(frame_bgr: np.ndarray, img_size: int) -> np.ndarray:
     return square
 
 
-def preprocess_square(square_bgr: np.ndarray) -> torch.Tensor:
-    """Normalize a 1024×1024 BGR image and convert to BCHW tensor."""
+def preprocess_square_fast(square_bgr: np.ndarray) -> torch.Tensor:
+    """
+    Minimal CPU work: BGR→RGB + uint8→tensor.
+    Normalization happens on GPU (see gpu_normalize).
+    """
     rgb = cv2.cvtColor(square_bgr, cv2.COLOR_BGR2RGB)
-    img = rgb.astype(np.float32) / 255.0
-    img = (img - IMAGENET_MEAN) / IMAGENET_STD
-    return torch.from_numpy(img.transpose(2, 0, 1)).unsqueeze(0)
+    # (H, W, 3) uint8 → (1, 3, H, W) float32 tensor — but DON'T normalize yet
+    tensor = torch.from_numpy(rgb.transpose(2, 0, 1)).unsqueeze(0).float()
+    return tensor
 
+
+# GPU-side ImageNet normalization constants (created once per worker)
+_GPU_MEAN = None
+_GPU_STD  = None
+
+def gpu_normalize(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """
+    Normalize on GPU: much faster than numpy on CPU.
+    tensor: (1, 3, H, W) float32 in [0, 255] range.
+    """
+    global _GPU_MEAN, _GPU_STD
+    if _GPU_MEAN is None or _GPU_MEAN.device != device:
+        _GPU_MEAN = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
+        _GPU_STD  = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
+    tensor = tensor / 255.0
+    tensor = (tensor - _GPU_MEAN) / _GPU_STD
+    return tensor
+
+
+# =============================================================================
+# ██ THREADED FRAME PREFETCHER ██
+# =============================================================================
+
+class FramePrefetcher:
+    """
+    Reads and letterboxes frames in a background thread.
+    Main thread can pull ready tensors while GPU processes the previous frame.
+    """
+    def __init__(self, video_path: str, img_size: int, queue_size: int = 8):
+        self.cap = cv2.VideoCapture(video_path)
+        self.img_size = img_size
+        self.queue = __import__('queue').Queue(maxsize=queue_size)
+        self.thread = threading.Thread(target=self._worker, daemon=True)
+        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 60.0
+        self._ok = self.cap.isOpened()
+
+    def start(self):
+        if self._ok:
+            self.thread.start()
+        return self
+
+    def _worker(self):
+        while True:
+            ret, frame = self.cap.read()
+            if not ret:
+                self.queue.put(None)  # signal end
+                break
+            square = letterbox_frame(frame, self.img_size)
+            tensor = preprocess_square_fast(square)
+            self.queue.put(tensor)
+        self.cap.release()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        item = self.queue.get()
+        if item is None:
+            raise StopIteration
+        return item
+
+    @property
+    def is_open(self):
+        return self._ok
+
+
+# =============================================================================
+# ██ INFERENCE ON SINGLE VIDEO ██
+# =============================================================================
+
+def run_inference_on_video(model, video_path: str, output_dir: str,
+                           video_basename: str, device: torch.device,
+                           img_size: int = IMG_SIZE,
+                           use_amp: bool = USE_AMP) -> dict:
+    """
+    Run CondSeg inference on a single video file.
+    Uses threaded prefetch + GPU-side normalization for speed.
+    Saves 5 .npy signal files to output_dir.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    prefetcher = FramePrefetcher(video_path, img_size).start()
+    if not prefetcher.is_open:
+        return {"error": f"Cannot open video: {video_path}"}
+
+    frame_idx = 0
+    all_params = []
+    t_start = time.time()
+
+    # Profiling accumulators
+    prof = {"prefetch_wait": 0, "gpu_normalize": 0, "model": 0}
+    prof_interval = 100
+
+    with torch.no_grad():
+        for tensor_cpu in prefetcher:
+            t0 = time.time()
+
+            # Transfer to GPU + normalize there
+            tensor = tensor_cpu.to(device, non_blocking=True)
+            t1 = time.time()
+            tensor = gpu_normalize(tensor, device)
+            t2 = time.time()
+
+            # Forward pass
+            if use_amp and device.type == "cuda":
+                with torch.amp.autocast("cuda"):
+                    outputs = model(tensor)
+            else:
+                outputs = model(tensor)
+            torch.cuda.synchronize(device)
+            t3 = time.time()
+
+            iris_params = outputs["iris_params"][0].cpu().float().numpy()
+            all_params.append(iris_params.copy())
+            frame_idx += 1
+
+            # Accumulate profiling
+            prof["prefetch_wait"] += (t1 - t0)
+            prof["gpu_normalize"] += (t2 - t1)
+            prof["model"]         += (t3 - t2)
+
+            # Print breakdown every N frames
+            if frame_idx == prof_interval:
+                total_prof = sum(prof.values())
+                print(f"  [GPU-{device.index}] ── Timing ({prof_interval}f) ──  "
+                      f"wait: {prof['prefetch_wait']/prof_interval*1000:.1f}ms  "
+                      f"norm: {prof['gpu_normalize']/prof_interval*1000:.1f}ms  "
+                      f"model: {prof['model']/prof_interval*1000:.1f}ms  "
+                      f"→ {prof_interval/total_prof:.1f} FPS")
+
+    elapsed = time.time() - t_start
+    avg_fps = frame_idx / elapsed if elapsed > 0 else 0
+
+    # Save signals as .npy
+    if len(all_params) > 0:
+        params_array = np.array(all_params)  # (N, 5)
+        for i, name in enumerate(SIGNAL_NAMES):
+            npy_path = os.path.join(output_dir, f"{video_basename}_{name}.npy")
+            np.save(npy_path, params_array[:, i])
+
+    return {
+        "frames": frame_idx,
+        "video_fps": prefetcher.fps,
+        "inference_fps": round(avg_fps, 1),
+        "duration_s": round(elapsed, 1),
+    }
+
+
+# =============================================================================
+# ██ FFT ANALYSIS ON SAVED SIGNALS ██
+# =============================================================================
 
 # =============================================================================
 # ██ SIGNAL PROCESSING (from signal_cropper.py) ██
@@ -286,104 +441,6 @@ def compute_fft(signal: np.ndarray, sample_rate: float):
     frequencies = np.fft.fftfreq(n, 1 / sample_rate)[:n // 2]
 
     return frequencies, fft_magnitude, fft_magnitude_db
-
-
-# =============================================================================
-# ██ INFERENCE ON SINGLE VIDEO ██
-# =============================================================================
-
-def run_inference_on_video(model, video_path: str, output_dir: str,
-                           video_basename: str, device: torch.device,
-                           img_size: int = IMG_SIZE,
-                           use_amp: bool = USE_AMP) -> dict:
-    """
-    Run CondSeg inference on a single video file.
-    Saves 5 .npy signal files to output_dir.
-
-    Returns dict with metadata: frames, fps, duration, or error info.
-    """
-    os.makedirs(output_dir, exist_ok=True)
-
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        return {"error": f"Cannot open video: {video_path}"}
-
-    video_fps = cap.get(cv2.CAP_PROP_FPS) or 60.0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-    frame_idx = 0
-    all_params = []
-    t_start = time.time()
-
-    # Profiling accumulators (reset every 100 frames)
-    prof = {"decode": 0, "letterbox": 0, "preprocess": 0, "transfer": 0, "model": 0}
-    prof_interval = 100
-
-    with torch.no_grad():
-        while True:
-            t0 = time.time()
-            ret, frame = cap.read()
-            if not ret:
-                break
-            t1 = time.time()
-
-            square = letterbox_frame(frame, img_size)
-            t2 = time.time()
-
-            tensor = preprocess_square(square)
-            t3 = time.time()
-
-            tensor = tensor.to(device)
-            t4 = time.time()
-
-            if use_amp and device.type == "cuda":
-                with torch.amp.autocast("cuda"):
-                    outputs = model(tensor)
-            else:
-                outputs = model(tensor)
-            torch.cuda.synchronize(device)
-            t5 = time.time()
-
-            iris_params = outputs["iris_params"][0].cpu().float().numpy()
-            all_params.append(iris_params.copy())
-            frame_idx += 1
-
-            # Accumulate profiling
-            prof["decode"]     += (t1 - t0)
-            prof["letterbox"]  += (t2 - t1)
-            prof["preprocess"] += (t3 - t2)
-            prof["transfer"]   += (t4 - t3)
-            prof["model"]      += (t5 - t4)
-
-            # Print breakdown every N frames (only first video per worker)
-            if frame_idx == prof_interval:
-                total_prof = sum(prof.values())
-                print(f"  [GPU-{device.index}] ── Timing breakdown ({prof_interval} frames) ──")
-                for k, v in prof.items():
-                    pct = v / total_prof * 100
-                    ms = v / prof_interval * 1000
-                    print(f"    {k:>12s}: {ms:5.1f} ms/frame ({pct:4.1f}%)")
-                print(f"    {'TOTAL':>12s}: {total_prof / prof_interval * 1000:.1f} ms/frame "
-                      f"→ {prof_interval / total_prof:.1f} FPS")
-
-    cap.release()
-
-    elapsed = time.time() - t_start
-    avg_fps = frame_idx / elapsed if elapsed > 0 else 0
-
-    # Save signals as .npy
-    if len(all_params) > 0:
-        params_array = np.array(all_params)  # (N, 5)
-        for i, name in enumerate(SIGNAL_NAMES):
-            npy_path = os.path.join(output_dir, f"{video_basename}_{name}.npy")
-            np.save(npy_path, params_array[:, i])
-
-    return {
-        "frames": frame_idx,
-        "video_fps": video_fps,
-        "inference_fps": round(avg_fps, 1),
-        "duration_s": round(elapsed, 1),
-    }
 
 
 # =============================================================================

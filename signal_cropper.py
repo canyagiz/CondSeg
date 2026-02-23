@@ -489,7 +489,7 @@ class SignalCropperApp:
         
         return frequencies, fft_magnitude, fft_magnitude_db
     
-    def preprocess_signal(self, signal, lowcut=1.0, highcut=4.0):
+    def preprocess_signal(self, signal, lowcut=0.5, highcut=4.0):
         """
         Preprocess signal by:
         1. Removing DC component (subtract mean)
@@ -577,7 +577,7 @@ class SignalCropperApp:
             cropped_time = self.time[start_idx:end_idx] - self.time[start_idx]
             
             # Apply preprocessing: Remove DC + 1-4 Hz bandpass filter
-            cropped_signal = self.preprocess_signal(cropped_signal_raw, lowcut=1.0, highcut=4.0)
+            cropped_signal = self.preprocess_signal(cropped_signal_raw, lowcut=0.5, highcut=4.0)
             
             # Calculate SNR on preprocessed signal
             snr_data = self.calculate_snr(cropped_signal)
@@ -723,7 +723,7 @@ class SignalCropperApp:
         start_idx, end_idx, name = self.crops[crop_idx]
         cropped_signal_raw = self.signal[start_idx:end_idx]
         cropped_time = self.time[start_idx:end_idx] - self.time[start_idx]
-        preprocessed_signal = self.preprocess_signal(cropped_signal_raw, lowcut=1.0, highcut=4.0)
+        preprocessed_signal = self.preprocess_signal(cropped_signal_raw, lowcut=0.5, highcut=4.0)
 
         # Design narrow Butterworth bandpass filter (SOS form)
         low = lowcut / nyquist
@@ -1504,7 +1504,7 @@ class SignalCropperApp:
                     
                     # Apply preprocessing based on checkbox setting
                     if apply_bandpass:
-                        preprocessed = self.preprocess_signal(window_signal, lowcut=1.0, highcut=4.0)
+                        preprocessed = self.preprocess_signal(window_signal, lowcut=0.5, highcut=4.0)
                     else:
                         preprocessed = window_signal - np.mean(window_signal)  # Just DC removal
                     

@@ -136,6 +136,8 @@ def main():
                                 fontsize=7, ha="center", color="#374151")
 
                 ax.set_xscale("log")
+                tick_vals = sorted(set(delta_px_vals))
+                ax.set_xticks(tick_vals)
                 ax.xaxis.set_major_formatter(ticker.FormatStrFormatter("%g"))
                 ax.xaxis.set_minor_formatter(ticker.NullFormatter())
 

@@ -8,6 +8,7 @@ Yöntemler:
   1. Raw FFT (bandpass yok, sadece DC removal + Hanning window)
   2. Bandpass FFT (0.5–4.0 Hz Butterworth + Hanning window)
   3. Harmonics Sum (fundamental + 2., 3., 4., 5. harmoniklerin mag toplamı)
+  4. Total Magnitude (tüm FFT bin magnitudelerinin toplamı)
 
 Kullanım:
     python signal_scatter.py
@@ -93,12 +94,12 @@ def get_harmonics_sum(frequencies, magnitudes, fundamental_freq, n_harmonics=N_H
     return total
 
 
-# ── 3 Yöntemle Analiz ────────────────────────────────────────────────────
+# ── 4 Yöntemle Analiz ────────────────────────────────────────────────────
 
 def analyze_sample(sample_id: int, target_freq: float):
     """
-    Bir sample için 3 yöntemle FFT magnitude hesapla.
-    Returns: (raw_mag, bp_mag, harmonics_mag) or None
+    Bir sample için 4 yöntemle FFT magnitude hesapla.
+    Returns: (raw_mag, bp_mag, harmonics_mag, total_mag) or None
     """
     signal = load_raw_signal(sample_id)
     if signal is None or len(signal) < 30:
@@ -116,7 +117,10 @@ def analyze_sample(sample_id: int, target_freq: float):
     # 3. Harmonics Sum (raw FFT üzerinden)
     harm_mag = get_harmonics_sum(freqs, mags, target_freq)
 
-    return raw_mag, bp_mag, harm_mag
+    # 4. Total Magnitude (tüm binlerin toplamı)
+    total_mag = float(np.sum(mags))
+
+    return raw_mag, bp_mag, harm_mag, total_mag
 
 
 # ── Ana Fonksiyon ────────────────────────────────────────────────────────
@@ -156,9 +160,9 @@ def main():
 
     print(f"   {len(video_names)} video, {len(freq_values)} frekans")
 
-    METHOD_NAMES = ["Raw FFT (bandpass yok)", "Bandpass + FFT", "Harmonics Sum"]
-    METHOD_COLORS = ["#dc2626", "#2563eb", "#16a34a"]  # red, blue, green
-    METHOD_EDGES  = ["#991b1b", "#1e40af", "#166534"]
+    METHOD_NAMES = ["Raw FFT (bandpass yok)", "Bandpass + FFT", "Harmonics Sum", "Total Magnitude"]
+    METHOD_COLORS = ["#dc2626", "#2563eb", "#16a34a", "#ea580c"]  # red, blue, green, orange
+    METHOD_EDGES  = ["#991b1b", "#1e40af", "#166534", "#c2410c"]
 
     total_plots = 0
 
@@ -166,10 +170,10 @@ def main():
         video_df = combined[combined["video_name"] == video_name]
         n_freq = len(freq_values)
 
-        # 3 satır (yöntem) × n_freq sütun düzeni → 3 grup × 3×3 grid
+        # 4 satır (yöntem) × n_freq sütun düzeni → 4 grup × 3×3 grid
         n_cols = 3
         n_method_rows = (n_freq + n_cols - 1) // n_cols  # 3 rows per method
-        total_rows = n_method_rows * 3  # 3 methods
+        total_rows = n_method_rows * 4  # 4 methods
 
         fig, all_axes = plt.subplots(total_rows, n_cols,
                                       figsize=(6 * n_cols, 3.8 * total_rows))
@@ -177,7 +181,7 @@ def main():
 
         fig.suptitle(f"{video_name}", fontsize=18, fontweight="bold", y=0.995)
 
-        for method_idx in range(3):
+        for method_idx in range(4):
             row_offset = method_idx * n_method_rows
 
             for i, f_hz in enumerate(freq_values):

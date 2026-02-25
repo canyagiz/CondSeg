@@ -111,6 +111,28 @@ with pd.ExcelWriter(OUTPUT_XLSX, engine='openpyxl') as writer:
             writer, sheet_name=sheet_name, index=False
         )
 
+    # ── Frekans bazlı sheet'ler (sadece temiz veri: head=none, gaze=none) ─
+    clean_all = display_df[
+        (df['head_tier'] == 'none') & (df['gaze_tier'] == 'none')
+    ].copy()
+
+    for f_val in sorted(clean_all['f_hz'].unique()):
+        freq_df = clean_all[clean_all['f_hz'] == f_val].copy()
+        freq_df = freq_df.sort_values(['video_name', 'delta_px'])
+        sheet_name = f'f={f_val}Hz'[:31]
+
+        # video_name grupları arasına boş satır ekle
+        grouped_parts = []
+        for vname, grp in freq_df.groupby('video_name', sort=True):
+            grouped_parts.append(grp)
+            # Boş ayraç satırı
+            blank = pd.DataFrame({c: [''] for c in freq_df.columns})
+            grouped_parts.append(blank)
+        if grouped_parts:
+            grouped_parts.pop()  # son boş satırı kaldır
+        freq_grouped = pd.concat(grouped_parts, ignore_index=True)
+        freq_grouped.to_excel(writer, sheet_name=sheet_name, index=False)
+
     # Kolon genişliklerini otomatik ayarla
     for sheet_name in writer.sheets:
         ws = writer.sheets[sheet_name]

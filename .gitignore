@@ -11,3 +11,9 @@ __pycache__
 *.csv
 *.xlsx
 *runs
+.venv
+.env
+__pycache__
+.vscode
+models
+wandb
